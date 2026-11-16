@@ -1,0 +1,23 @@
+[project]
+name = "horilla-mcp"
+version = "0.1.0"
+description = "MCP server for the Horilla open-source HRMS: employees, leave and attendance as tools for AI assistants"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=2.3,<3",
+    "httpx>=0.28",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+horilla-mcp = "horilla_mcp.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
