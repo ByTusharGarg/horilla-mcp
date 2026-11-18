@@ -124,12 +124,14 @@ user, the shared demo password `Horilla@Demo1`:
 | HR manager | `michael.brown@horilla.com` | `Horilla@Demo1` | Michael Brown, "HR Manager" group; reports to Christopher Miller | Sees and decides company leave requests; also applies for his own leave |
 | Leave manager | `emily.clark@horilla.com` | `Horilla@Demo1` | Emily Clark, "Leave Manager" group; reports to Christopher Miller | Approves or rejects leave requests; applies for her own |
 | Reporting manager | `christopher.miller@horilla.com` | `Horilla@Demo1` | Christopher Miller, manages 7 people (Michael, Emily, Emma and others), no admin groups | Sees his team's leave requests (22 in the demo data) and approves or rejects them |
-| Employee | `emma.lee@horilla.com` | `Horilla@Demo1` | Emma Lee, no groups; reports to Christopher Miller | Her own profile, balance, requests, holidays and attendance; `list_leave_requests` returns 403 |
+| Employee | `emma.lee@horilla.com` | `Horilla@Demo1` | Emma Lee, no groups; reports to Christopher Miller | Her own profile, balance, requests and attendance; `list_leave_requests` and `list_holidays` return 403 |
 
 These are demo-data accounts on a local Horilla. Don't reuse the password anywhere real, and
 change it before exposing Horilla to a network.
 
 Good pairs for the apply-and-approve flow: Emma (or Michael) applies, Christopher approves.
+Horilla's API lists holidays only for users with its `view_holiday` permission: in the demo
+data that's admin and Michael Brown; everyone else gets 403 from `list_holidays`.
 Five wrong passwords in a row lock an account for 30 minutes (django-axes); unlock it sooner with
 `.venv\Scripts\python manage.py axes_reset`.
 
