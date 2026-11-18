@@ -154,6 +154,50 @@ def test_client_needs_credentials_or_tokens():
         HorillaClient("http://horilla.test")
 
 
+@pytest.fixture
+def delegated(monkeypatch):
+    """Delegated mode: no login of its own; each call names its user's token in _meta."""
+    fake = FakeHorilla()
+    transport = httpx.MockTransport(fake.handler)
+    monkeypatch.setenv("HORILLA_MCP_DELEGATED", "1")
+    monkeypatch.setattr(server, "make_client", lambda: pytest.fail("delegated mode must not log in"))
+    monkeypatch.setattr(server, "make_delegated_client", lambda token, me: HorillaClient(
+        "http://horilla.test", access_token=token, me=me, transport=transport))
+    return fake
+
+
+async def call_as(token: str | None, tool: str, args: dict | None = None, employee=None):
+    meta = {}
+    if token:
+        meta[server.DELEGATED_TOKEN] = token
+    if employee:
+        meta[server.DELEGATED_EMPLOYEE] = employee
+    async with Client(server.mcp) as c:
+        res = await c.call_tool(tool, args or {}, meta=meta or None)
+        return res.is_error, "".join(getattr(b, "text", "") for b in res.content)
+
+
+async def test_delegated_calls_run_as_the_token_in_meta(delegated):
+    is_error, _ = await call_as("emma-token", "list_holidays")
+    assert not is_error and delegated.requests[-1].headers["authorization"] == "Bearer emma-token"
+    await call_as("chris-token", "list_holidays")
+    assert delegated.requests[-1].headers["authorization"] == "Bearer chris-token"
+    _, text = await call_as("emma-token", "get_my_profile", employee={"id": 8, "full_name": "Emma Lee"})
+    assert json.loads(text)["full_name"] == "Emma Lee"
+    assert delegated.logins == 0
+
+
+async def test_delegated_mode_refuses_calls_without_a_user(delegated):
+    is_error, text = await call_as(None, "list_holidays")
+    assert is_error and "delegated mode" in text and delegated.requests == []
+
+
+async def test_expired_delegated_token_asks_to_sign_in_again(delegated):
+    delegated.expire_next = True
+    is_error, text = await call_as("old-token", "list_holidays")
+    assert is_error and "session has expired" in text
+
+
 async def test_apply_leave_defaults_end_date(fake):
     is_error, text = await call("apply_leave", {"leave_type_id": 2, "start_date": "2026-12-15"})
     assert not is_error

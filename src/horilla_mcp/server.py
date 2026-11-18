@@ -8,6 +8,12 @@ or, for an app that already signed the user in (e.g. the HR Assistant), instead 
 username and password:
   HORILLA_ACCESS_TOKEN, HORILLA_REFRESH_TOKEN  the tokens from Horilla's /api/auth/login/
   HORILLA_EMPLOYEE  optional: the login response's "employee" object, as JSON
+
+Delegated mode (`--http --delegated`, or HORILLA_MCP_DELEGATED=1) serves many users from one
+stateless process: it never logs in itself, and each tool call carries the calling user's
+Horilla access token in its `_meta` (see DELEGATED_TOKEN below). Any copy of the server can
+answer any call, so it scales horizontally behind a plain load balancer. A token in `_meta`
+is also honoured in the other modes, for that one call.
 """
 
 from __future__ import annotations
@@ -47,6 +53,15 @@ def _load_dotenv() -> None:
             os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
 
 
+# `_meta` keys a caller uses to run one tool call as a specific Horilla user.
+DELEGATED_TOKEN = "horilla-mcp/access-token"  # that user's Horilla access token (JWT)
+DELEGATED_EMPLOYEE = "horilla-mcp/employee"  # optional: their login "employee" object
+
+
+def delegated_mode() -> bool:
+    return os.environ.get("HORILLA_MCP_DELEGATED", "").lower() in ("1", "true", "yes")
+
+
 def make_client() -> HorillaClient:
     """Build the Horilla client from the environment. Tests replace this function."""
     url = os.environ.get("HORILLA_URL") or None
@@ -70,8 +85,18 @@ def make_client() -> HorillaClient:
     return HorillaClient(url, user, password)
 
 
+def make_delegated_client(access_token: str, me: dict[str, Any] | None) -> HorillaClient:
+    """A client for one call made on behalf of another user. Tests replace this function."""
+    _load_dotenv()
+    return HorillaClient(os.environ.get("HORILLA_URL", "http://localhost:8000"),
+                         access_token=access_token, me=me)
+
+
 @asynccontextmanager
-async def lifespan(_: MCPServer) -> AsyncIterator[HorillaClient]:
+async def lifespan(_: MCPServer) -> AsyncIterator[HorillaClient | None]:
+    if delegated_mode():
+        yield None  # no user of its own: every call must carry one
+        return
     client = make_client()
     try:
         yield client
@@ -79,12 +104,34 @@ async def lifespan(_: MCPServer) -> AsyncIterator[HorillaClient]:
         await client.aclose()
 
 
+@asynccontextmanager
+async def _horilla(ctx: Context) -> AsyncIterator[HorillaClient]:
+    """The Horilla client for this call: the caller's user from `_meta` if given, else the
+    server's own login."""
+    meta = ctx.request_context.meta or {}
+    token = meta.get(DELEGATED_TOKEN)
+    if token:
+        employee = meta.get(DELEGATED_EMPLOYEE)
+        client = make_delegated_client(str(token), employee if isinstance(employee, dict) else None)
+        try:
+            yield client
+        finally:
+            await client.aclose()
+        return
+    client = ctx.request_context.lifespan_context
+    if client is None:
+        raise ToolError(f"No Horilla user for this call: this server runs in delegated mode, so send "
+                        f"the user's Horilla access token in _meta[{DELEGATED_TOKEN!r}].")
+    yield client
+
+
 mcp = MCPServer(
     "horilla-hrms",
     instructions=(
         "Tools for the Horilla HRMS: look up employees, check leave balances, apply for leave, "
         "approve or reject leave requests, view holidays, and clock in or out. All actions run as "
-        "the configured Horilla user, with that user's permissions. Dates use YYYY-MM-DD. Before "
+        "one Horilla user (the server's own login, or the caller's user in delegated mode), with "
+        "that user's permissions. Dates use YYYY-MM-DD. Before "
         "applying for leave, call list_leave_types or get_my_leave_balance to find the leave_type_id. "
         "Confirm with the user before approving, rejecting or applying for leave."
     ),
@@ -93,11 +140,11 @@ mcp = MCPServer(
 
 
 async def _call(ctx: Context, method: str, path: str, *, params=None, json=None) -> Any:
-    client: HorillaClient = ctx.request_context.lifespan_context
-    try:
-        return await client.request(method, path, params=params, json=json)
-    except HorillaError as e:
-        raise ToolError(str(e)) from None
+    async with _horilla(ctx) as client:
+        try:
+            return await client.request(method, path, params=params, json=json)
+        except HorillaError as e:
+            raise ToolError(str(e)) from None
 
 
 def _results(data: Any) -> Any:
@@ -125,10 +172,16 @@ def _check_date(name: str, value: str | None) -> None:
 @mcp.tool(annotations=READ)
 async def get_my_profile(ctx: Context) -> Any:
     """Return the employee record of the Horilla user this server is logged in as."""
-    client: HorillaClient = ctx.request_context.lifespan_context
-    if client.me is None:
-        await _call(ctx, "GET", "leave/available-leave/")  # forces a login
-    return client.me
+    async with _horilla(ctx) as client:
+        if client.me is None:
+            try:
+                await client.request("GET", "leave/available-leave/")  # a password login fills `me`
+            except HorillaError as e:
+                raise ToolError(str(e)) from None
+        if client.me is None:
+            raise ToolError("Profile not available: pass the login's employee object in "
+                            f"_meta[{DELEGATED_EMPLOYEE!r}].")
+        return client.me
 
 
 @mcp.tool(annotations=READ)
@@ -275,7 +328,13 @@ def main() -> None:
                         help="serve Streamable HTTP at /mcp instead of stdio (needs MCP_AUTH_TOKEN)")
     parser.add_argument("--host", default=os.environ.get("MCP_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "9000")))
+    parser.add_argument("--delegated", action="store_true",
+                        help="HTTP only: no login of its own; each call carries its user's Horilla token")
     args = parser.parse_args()
+    if args.delegated:
+        if not args.http:
+            raise SystemExit("--delegated needs --http.")
+        os.environ["HORILLA_MCP_DELEGATED"] = "1"
 
     if not args.http:
         mcp.run(transport="stdio")

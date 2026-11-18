@@ -332,7 +332,8 @@ Horilla and are safe for CI:
 ```
 
 They cover login and bearer tokens, token refresh after a 401, sessions started from tokens
-(no password login, a clear error when the session expires), pagination, date validation,
+(no password login, a clear error when the session expires), delegated mode (each call runs as
+the token in its `_meta`, calls without one are refused), pagination, date validation,
 leave-application defaults, the attachment-required error, reject reasons, API error handling
 and the HTTP auth middleware.
 
@@ -370,6 +371,37 @@ to it with:
 claude mcp add horilla-remote --transport http https://<your-host>/mcp --header "Authorization: Bearer <token>"
 ```
 
+### Many users, many copies: delegated mode
+
+By default the server acts as the one Horilla user in its `.env`. An app that signs its own
+users in (like the [HR Assistant](https://github.com/ByTusharGarg/hr-assistant)) can instead run
+one shared server in **delegated mode** and send each tool call with the calling user's Horilla
+access token, so every call runs with that user's own Horilla permissions:
+
+```powershell
+horilla-mcp --http --delegated --port 9000    # or set HORILLA_MCP_DELEGATED=1
+```
+
+- The server never logs in itself and needs no `HORILLA_USERNAME` / `HORILLA_PASSWORD`, only
+  `HORILLA_URL` and `MCP_AUTH_TOKEN` (which authenticates the calling app).
+- Each `tools/call` carries the user in its `_meta`:
+  `"horilla-mcp/access-token": "<the user's Horilla access JWT>"` and, optionally,
+  `"horilla-mcp/employee": {...}` (the login response's `employee` object, which
+  `get_my_profile` returns). A call without a token is refused.
+- The calling app keeps the user's refresh token and renews the access token before it expires;
+  an expired token gets "The Horilla session has expired. Sign in again."
+- HTTP mode is stateless (`stateless_http`, plain JSON responses: no MCP session id and no SSE
+  stream to pin), and delegated mode holds no login, so any copy can answer any call: run as many
+  as you need behind an ordinary load balancer, no sticky sessions.
+
+With the Python SDK:
+
+```python
+await client.call_tool("get_my_leave_balance", {}, meta={"horilla-mcp/access-token": access_jwt})
+```
+
+A token in `_meta` also works in the normal modes, for that one call.
+
 **Hosting options**
 
 - **A VM or server next to Horilla** (simplest): install as in step 2, run `horilla-mcp --http`
@@ -385,8 +417,10 @@ claude mcp add horilla-remote --transport http https://<your-host>/mcp --header 
 
 - Always use HTTPS: the bearer token and HR data travel in every request.
 - Give the MCP its own Horilla account with only the permissions it needs, not `admin`.
-- One shared token means every caller acts as the same Horilla user. For per-employee identity,
-  the next step is MCP's OAuth support, mapping each signed-in user to their own Horilla account.
+- Without `--delegated`, one shared token means every caller acts as the same Horilla user. For
+  per-employee identity, use delegated mode from a trusted backend that signs users in (above);
+  for MCP clients that connect directly (e.g. Claude), the next step is MCP's OAuth support,
+  mapping each signed-in user to their own Horilla account.
 - Set `DEBUG=False` and a strong `SECRET_KEY` in Horilla, and keep `.env` files out of git
   (`.gitignore` already covers this project's).
 
