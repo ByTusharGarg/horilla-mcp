@@ -16,17 +16,26 @@ class HorillaClient:
     def __init__(
         self,
         base_url: str,
-        username: str,
-        password: str,
+        username: str | None = None,
+        password: str | None = None,
         timeout: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        *,
+        access_token: str | None = None,
+        refresh_token: str | None = None,
+        me: dict[str, Any] | None = None,
     ):
+        """Log in with `username` and `password`, or reuse a session another app already
+        opened by passing its `access_token` and `refresh_token` (and the login response's
+        `employee` as `me`). A token session ends when the refresh token stops working."""
+        if not (username and password) and not (access_token or refresh_token):
+            raise ValueError("Give a username and password, or an access or refresh token.")
         self._username = username
         self._password = password
-        self._access: str | None = None
-        self._refresh: str | None = None
+        self._access: str | None = access_token
+        self._refresh: str | None = refresh_token
         self._login_lock = asyncio.Lock()
-        self.me: dict[str, Any] | None = None
+        self.me: dict[str, Any] | None = me
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/") + "/api/",
             timeout=timeout,
@@ -40,6 +49,8 @@ class HorillaClient:
     # ---- auth -----------------------------------------------------------
 
     async def login(self) -> None:
+        if not (self._username and self._password):
+            raise HorillaError("The Horilla session has expired. Sign in again.")
         resp = await self._http.post(
             "auth/login/", json={"username": self._username, "password": self._password}
         )
@@ -50,7 +61,10 @@ class HorillaClient:
         self.me = data.get("employee")
 
     async def _refresh_access(self) -> None:
+        stale = self._access
         async with self._login_lock:
+            if self._access is not None and self._access != stale:
+                return  # another request refreshed it while this one waited
             if self._refresh:
                 resp = await self._http.post("auth/refresh/", json={"refresh": self._refresh})
                 if resp.status_code == 200:
@@ -71,9 +85,7 @@ class HorillaClient:
         json: Any = None,
     ) -> Any:
         if self._access is None:
-            async with self._login_lock:
-                if self._access is None:
-                    await self.login()
+            await self._refresh_access()
         params = {k: v for k, v in (params or {}).items() if v is not None}
         for attempt in range(2):
             resp = await self._http.request(

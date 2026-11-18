@@ -109,14 +109,29 @@ $env:PYTHONIOENCODING = "utf-8"
 .venv\Scripts\python manage.py runserver 127.0.0.1:8000
 ```
 
-The demo users' passwords aren't published, so set your own for the accounts you'll use:
+### Test users
+
+Horilla's demo data doesn't publish passwords, so give these five accounts, one per kind of
+user, the shared demo password `Horilla@Demo1`:
 
 ```powershell
-.venv\Scripts\python manage.py shell -c "from django.contrib.auth import get_user_model as g; U=g(); [ (u.set_password('<password>'), u.save()) for u in U.objects.filter(username__in=['admin','michael.brown@horilla.com','christopher.miller@horilla.com']) ]"
+.venv\Scripts\python manage.py shell -c "from django.contrib.auth import get_user_model as g; [ (u.set_password('Horilla@Demo1'), u.save()) for u in g().objects.filter(username__in=['admin','michael.brown@horilla.com','emily.clark@horilla.com','christopher.miller@horilla.com','emma.lee@horilla.com']) ]"
 ```
 
-`admin` is the superuser; Michael Brown is an engineer whose reporting manager is Christopher Miller,
-which makes the pair useful for testing the apply-and-approve flow.
+| Kind of user | Username | Password | Who they are | What they can do through the tools |
+|---|---|---|---|---|
+| Admin | `admin` | `Horilla@Demo1` | Adam Admin, superuser | Everything: sees all 276 employees and every leave request, approves or rejects any of them |
+| HR manager | `michael.brown@horilla.com` | `Horilla@Demo1` | Michael Brown, "HR Manager" group; reports to Christopher Miller | Sees and decides company leave requests; also applies for his own leave |
+| Leave manager | `emily.clark@horilla.com` | `Horilla@Demo1` | Emily Clark, "Leave Manager" group; reports to Christopher Miller | Approves or rejects leave requests; applies for her own |
+| Reporting manager | `christopher.miller@horilla.com` | `Horilla@Demo1` | Christopher Miller, manages 7 people (Michael, Emily, Emma and others), no admin groups | Sees his team's leave requests (22 in the demo data) and approves or rejects them |
+| Employee | `emma.lee@horilla.com` | `Horilla@Demo1` | Emma Lee, no groups; reports to Christopher Miller | Her own profile, balance, requests, holidays and attendance; `list_leave_requests` returns 403 |
+
+These are demo-data accounts on a local Horilla. Don't reuse the password anywhere real, and
+change it before exposing Horilla to a network.
+
+Good pairs for the apply-and-approve flow: Emma (or Michael) applies, Christopher approves.
+Five wrong passwords in a row lock an account for 30 minutes (django-axes); unlock it sooner with
+`.venv\Scripts\python manage.py axes_reset`.
 
 Check it: http://localhost:8000 shows the login page, and http://localhost:8000/api/swagger/
 shows the API docs.
@@ -138,10 +153,19 @@ Edit `.env` with the Horilla user the assistant should act as:
 ```ini
 HORILLA_URL=http://localhost:8000
 HORILLA_USERNAME=admin
-HORILLA_PASSWORD=<password>
+HORILLA_PASSWORD=Horilla@Demo1
 ```
 
-The server reads `.env` from the project folder; real environment variables take precedence.
+Use any of the [test users](#test-users) to act as a different kind of user. The server reads
+`.env` from the project folder; real environment variables take precedence.
+
+An app that has already signed the user in can start the server with that user's Horilla
+tokens instead of a password: set `HORILLA_ACCESS_TOKEN` and `HORILLA_REFRESH_TOKEN` (from
+Horilla's `/api/auth/login/`) and optionally `HORILLA_EMPLOYEE` (the login response's `employee`
+object, as JSON). The server then never reads `.env` and never logs in with a password; when
+the refresh token stops working, tools return "The Horilla session has expired. Sign in again."
+The [HR Assistant](https://github.com/ByTusharGarg/hr-assistant) uses this to run one server
+per signed-in user.
 
 ## 3. Connect it to Claude
 
@@ -261,7 +285,9 @@ npx @modelcontextprotocol/inspector@2.13.0 -e HORILLA_USERNAME=christopher.mille
 ```
 
 Christopher is Michael's manager, so `list_leave_requests` with `status` = `requested` shows
-Michael's pending request, which you can then approve with `approve_leave_request`.
+Michael's pending request, which you can then approve with `approve_leave_request`. Swap in
+any other [test user](#test-users) the same way, e.g. `HORILLA_USERNAME=emma.lee@horilla.com` to
+see what a plain employee is allowed to do.
 
 ### CLI mode (no browser, good for quick checks and scripts)
 
@@ -305,7 +331,8 @@ Horilla and are safe for CI:
 .venv\Scripts\python -m pytest -q
 ```
 
-They cover login and bearer tokens, token refresh after a 401, pagination, date validation,
+They cover login and bearer tokens, token refresh after a 401, sessions started from tokens
+(no password login, a clear error when the session expires), pagination, date validation,
 leave-application defaults, the attachment-required error, reject reasons, API error handling
 and the HTTP auth middleware.
 

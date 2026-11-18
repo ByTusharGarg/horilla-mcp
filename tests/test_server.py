@@ -26,6 +26,7 @@ class FakeHorilla:
         self.requests: list[httpx.Request] = []
         self.logins = 0
         self.expire_next = False  # make the next authenticated call return 401 once
+        self.refresh_fails = False
 
     def handler(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
@@ -38,6 +39,8 @@ class FakeHorilla:
             return httpx.Response(200, json={"access": f"tok{self.logins}", "refresh": "r1",
                                              "employee": {"id": 2, "full_name": "Michael Brown"}})
         if path == "/api/auth/refresh/":
+            if self.refresh_fails:
+                return httpx.Response(401, json={"detail": "Token is blacklisted"})
             return httpx.Response(200, json={"access": "refreshed"})
         if self.expire_next:
             self.expire_next = False
@@ -101,6 +104,54 @@ async def test_refreshes_token_after_401(fake):
     is_error, _ = await call("list_holidays")
     assert not is_error
     assert fake.requests[-1].headers["authorization"] == "Bearer refreshed"
+
+
+@pytest.fixture
+def token_session(monkeypatch):
+    """A server started with tokens from a login another app made (the HR Assistant)."""
+    fake = FakeHorilla()
+    transport = httpx.MockTransport(fake.handler)
+    monkeypatch.setattr(server, "make_client", lambda: HorillaClient(
+        "http://horilla.test", access_token="given", refresh_token="r9",
+        me={"id": 7, "full_name": "Emma Lee"}, transport=transport))
+    return fake
+
+
+async def test_token_session_uses_given_tokens_without_logging_in(token_session):
+    is_error, _ = await call("list_holidays")
+    assert not is_error
+    assert token_session.logins == 0
+    assert token_session.requests[-1].headers["authorization"] == "Bearer given"
+    _, text = await call("get_my_profile")
+    assert json.loads(text)["full_name"] == "Emma Lee"
+
+
+async def test_token_session_refreshes_then_reports_expiry(token_session):
+    token_session.expire_next = True
+    is_error, _ = await call("list_holidays")
+    assert not is_error and token_session.requests[-1].headers["authorization"] == "Bearer refreshed"
+    token_session.expire_next = True
+    token_session.refresh_fails = True
+    is_error, text = await call("list_holidays")
+    assert is_error and "session has expired" in text
+    assert token_session.logins == 0  # never falls back to a password login
+
+
+def test_make_client_prefers_tokens_from_env(monkeypatch):
+    monkeypatch.setenv("HORILLA_URL", "http://horilla.test")
+    monkeypatch.setenv("HORILLA_ACCESS_TOKEN", "a1")
+    monkeypatch.setenv("HORILLA_REFRESH_TOKEN", "r1")
+    monkeypatch.setenv("HORILLA_EMPLOYEE", '{"id": 7, "full_name": "Emma Lee"}')
+    monkeypatch.setenv("HORILLA_USERNAME", "admin")
+    monkeypatch.setenv("HORILLA_PASSWORD", "secret")
+    client = server.make_client()
+    assert client.me == {"id": 7, "full_name": "Emma Lee"}
+    assert client._access == "a1" and client._username is None
+
+
+def test_client_needs_credentials_or_tokens():
+    with pytest.raises(ValueError):
+        HorillaClient("http://horilla.test")
 
 
 async def test_apply_leave_defaults_end_date(fake):

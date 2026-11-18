@@ -4,11 +4,16 @@ Configure with environment variables:
   HORILLA_URL       e.g. http://localhost:8000
   HORILLA_USERNAME  Horilla login (the server acts as this user)
   HORILLA_PASSWORD
+or, for an app that already signed the user in (e.g. the HR Assistant), instead of the
+username and password:
+  HORILLA_ACCESS_TOKEN, HORILLA_REFRESH_TOKEN  the tokens from Horilla's /api/auth/login/
+  HORILLA_EMPLOYEE  optional: the login response's "employee" object, as JSON
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 from collections.abc import AsyncIterator
@@ -44,6 +49,17 @@ def _load_dotenv() -> None:
 
 def make_client() -> HorillaClient:
     """Build the Horilla client from the environment. Tests replace this function."""
+    url = os.environ.get("HORILLA_URL") or None
+    if os.environ.get("HORILLA_ACCESS_TOKEN") or os.environ.get("HORILLA_REFRESH_TOKEN"):
+        # Token session: never fall back to the .env user, so a signed-in user's server
+        # can't silently act as someone else.
+        me = os.environ.get("HORILLA_EMPLOYEE")
+        return HorillaClient(
+            url or "http://localhost:8000",
+            access_token=os.environ.get("HORILLA_ACCESS_TOKEN") or None,
+            refresh_token=os.environ.get("HORILLA_REFRESH_TOKEN") or None,
+            me=json.loads(me) if me else None,
+        )
     _load_dotenv()
     try:
         url = os.environ.get("HORILLA_URL", "http://localhost:8000")
